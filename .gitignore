@@ -1,0 +1,38 @@
+# Local setup scripts, screenshots, logs and device verification artifacts
+.tools/
+.kotlin/
+local.properties
+.gradle/
+**/build/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Personal notes, exports and local data (documentation samples live in docs/images)
+/理论.md
+/exports/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.zip
+*.apk
+*.aab
+*.log
+
+# Credentials and signing material
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.pem
+*.p12
+*.key
+.ssh/
+id_ed25519*
+id_rsa*
+key.properties
+keystore.properties
