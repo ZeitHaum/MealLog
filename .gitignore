@@ -19,6 +19,7 @@ Thumbs.db
 *.sqlite3
 *.zip
 *.apk
+!/releases/v*/MealLog-*.apk
 *.aab
 *.log
 

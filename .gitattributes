@@ -10,3 +10,6 @@ gradlew.bat text eol=crlf
 *.png binary
 *.jpg binary
 *.jar binary
+*.apk binary
+*.yml text eol=lf
+SHA256SUMS text eol=lf

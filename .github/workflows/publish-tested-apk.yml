@@ -1,0 +1,49 @@
+name: Publish tested APK
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish the device-tested binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          release_dir="releases/$RELEASE_TAG"
+          apk_name="MealLog-${RELEASE_TAG#v}.apk"
+          grep -F "versionName '${RELEASE_TAG#v}'" app/build.gradle
+          (cd "$release_dir" && sha256sum --check SHA256SUMS)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$release_dir/$apk_name" "$release_dir/SHA256SUMS" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$release_dir/$apk_name" "$release_dir/SHA256SUMS" \
+              --verify-tag --title "MealLog $RELEASE_TAG" --notes-file "$release_dir/RELEASE_NOTES.md"
+          fi
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/release-check" --pattern "$apk_name"
+          cmp "$release_dir/$apk_name" "$RUNNER_TEMP/release-check/$apk_name"
+          gh release view "$RELEASE_TAG" --json url,tagName,assets > "$RUNNER_TEMP/release-receipt.json"
+          # Keep a receipt accessible over SSH without requiring a local API credential.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git ls-remote --exit-code origin refs/notes/releases >/dev/null 2>&1; then
+            git fetch origin refs/notes/releases:refs/notes/releases
+          fi
+          git notes --ref=releases add -f -F "$RUNNER_TEMP/release-receipt.json" HEAD
+          git push origin refs/notes/releases
