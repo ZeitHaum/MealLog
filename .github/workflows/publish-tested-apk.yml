@@ -3,12 +3,16 @@ name: Publish tested APK
 on:
   push:
     tags: ['v*.*.*']
+    branches: [main]
+    paths:
+      - 'releases/**'
+      - '.github/workflows/publish-tested-apk.yml'
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-publish
   cancel-in-progress: false
 
 jobs:
@@ -21,15 +25,19 @@ jobs:
       - name: Verify and publish the device-tested binary
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG="v$(awk -F "'" '/versionName / {print $2; exit}' app/build.gradle)"
+          fi
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           release_dir="releases/$RELEASE_TAG"
           apk_name="MealLog-${RELEASE_TAG#v}.apk"
           grep -F "versionName '${RELEASE_TAG#v}'" app/build.gradle
           (cd "$release_dir" && sha256sum --check SHA256SUMS)
+          git show "$RELEASE_TAG:$release_dir/SHA256SUMS" | cmp - "$release_dir/SHA256SUMS"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$release_dir/$apk_name" "$release_dir/SHA256SUMS" --clobber
           else
@@ -45,5 +53,5 @@ jobs:
           if git ls-remote --exit-code origin refs/notes/releases >/dev/null 2>&1; then
             git fetch origin refs/notes/releases:refs/notes/releases
           fi
-          git notes --ref=releases add -f -F "$RUNNER_TEMP/release-receipt.json" HEAD
+          git notes --ref=releases add -f -F "$RUNNER_TEMP/release-receipt.json" "$RELEASE_TAG^{commit}"
           git push origin refs/notes/releases
