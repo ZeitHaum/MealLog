@@ -3,48 +3,72 @@ package com.self.diet
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.temporal.ChronoUnit
-import kotlin.math.abs
-import kotlin.math.floor
-import kotlin.math.log10
-import kotlin.math.pow
+import kotlin.math.*
 
+enum class PredictionMode(val label: String, val key: String) {
+    DAILY("逐日预测", "daily_recomputed"), CUMULATIVE("累计预测", "cumulative_recomputed")
+}
+data class ModelPrediction(val predicted: Double, val sourceDate: LocalDate, val sourceWeight: Double,
+    val sourceWeightTime: String?, val sourceDeficit: Double?)
 data class TrendDay(
     val date: LocalDate, val weight: Record?, val energy: EnergyDay,
     val intake: Double?, val hasRecords: Boolean,
-    val prediction: AnalysisSnapshot?, val error: PredictionError?
+    val prediction: ModelPrediction?, val error: PredictionError?,
+    val mode: PredictionMode = PredictionMode.DAILY, val anchor: Record? = null,
+    val blockedOn: LocalDate? = null, val predictionStatus: String = "missing_source"
 ) {
     val activity: Double? get() = energy.baseline?.let { it - energy.bmr!! }
 }
-
-data class PredictionError(val date: LocalDate, val actual: Record, val snapshot: AnalysisSnapshot) {
-    val kilograms: Double get() = snapshot.predicted - actual.amount!!
-    val percent: Double get() = kilograms / actual.amount!! * 100.0
+data class PredictionError(val date: LocalDate, val actual: Record, val prediction: ModelPrediction) {
+    // Signed difference in kilograms. Never divide by total weight or take abs here.
+    val kilograms: Double get() = prediction.predicted - actual.amount!!
 }
-
 data class ErrorBin(val lower: Double, val upper: Double, val count: Int)
 data class ErrorDistribution(val bins: List<ErrorBin>, val extent: Double)
 
 object Trends {
-    fun days(records: List<Record>, snapshots: List<AnalysisSnapshot>, profile: ModelProfile, start: LocalDate, end: LocalDate): List<TrendDay> {
+    @Suppress("UNUSED_PARAMETER") // Archived snapshots are retained, but no longer gate forecasts.
+    fun days(records: List<Record>, snapshots: List<AnalysisSnapshot>, profile: ModelProfile,
+        start: LocalDate, end: LocalDate, mode: PredictionMode = PredictionMode.DAILY): List<TrendDay> {
         require(!end.isBefore(start))
+        val count = ChronoUnit.DAYS.between(start, end)
+        require(count < 36600) { "日期范围过长" }
         val byDay = records.groupBy { LocalDate.parse(it.date) }
-        val predictions = snapshots.filter {
-            // Only a saved estimate for its own day is a prospective next-day prediction.
-            it.mode == "same_day_estimate" && OffsetDateTime.parse(it.generatedAt).toLocalDate() == LocalDate.parse(it.date) &&
-                OffsetDateTime.parse(it.weightTime).toInstant() <= OffsetDateTime.parse(it.generatedAt).toInstant() && it.predicted.isFinite()
-        }.groupBy { LocalDate.parse(it.date).plusDays(1) }
-        return (0..ChronoUnit.DAYS.between(start, end)).map { offset ->
+        val anchor = if(mode == PredictionMode.CUMULATIVE) records.filter {
+            EnergyModel.validWeight(it) && LocalDate.parse(it.date) in start..end
+        }.minWithOrNull(compareBy<Record> { LocalDate.parse(it.date) }
+            .thenBy { OffsetDateTime.parse(it.occurredAt).toInstant() }.thenBy { it.id }) else null
+        val anchorDate = anchor?.let { LocalDate.parse(it.date) }
+        var carried: ModelPrediction? = null
+        var blocked: LocalDate? = null
+        return (0..count).map { offset ->
             val date = start.plusDays(offset)
             val day = byDay[date].orEmpty()
-            val weights = day.filter { it.kind == Kinds.WEIGHT && it.amount != null }
-            val actual = weights.maxByOrNull { OffsetDateTime.parse(it.occurredAt).toInstant() }
-            // Reject snapshots saved after any target-day weigh-in or its earlier entry time.
-            val cutoff = weights.flatMap { listOf(OffsetDateTime.parse(it.occurredAt).toInstant(), OffsetDateTime.parse(it.createdAt).toInstant()) }.minOrNull()
-            val prediction = predictions[date].orEmpty().filter { cutoff == null || OffsetDateTime.parse(it.generatedAt).toInstant() < cutoff }
-                .maxWithOrNull(compareBy<AnalysisSnapshot> { OffsetDateTime.parse(it.generatedAt).toInstant() }.thenBy { it.id })
-            val energy = EnergyModel.calculate(day, profile)
-            val intake = energy.intake.takeIf { day.any { r -> r.kind == Kinds.MEAL } && energy.missingMeals == 0 }
-            TrendDay(date, actual, energy, intake, day.isNotEmpty(), prediction, if(actual != null && prediction != null) PredictionError(date, actual, prediction) else null)
+            val actual = if(date == anchorDate) anchor else EnergyModel.latestWeight(day)
+            val prediction = if(mode == PredictionMode.DAILY) {
+                val prior = EnergyModel.calculate(byDay[date.minusDays(1)].orEmpty(), profile)
+                prior.predicted?.let { ModelPrediction(it, date.minusDays(1), prior.weight!!, prior.weightTime, prior.deficit) }
+            } else if(date == anchorDate) ModelPrediction(anchor!!.amount!!, date, anchor.amount, anchor.occurredAt, null)
+            else carried
+            val energy = if(mode == PredictionMode.DAILY) EnergyModel.calculate(day, profile)
+                else EnergyModel.calculateAtWeight(day, profile, prediction?.predicted, if(date == anchorDate) anchor?.occurredAt else null)
+            val status = when {
+                mode == PredictionMode.DAILY -> if(prediction != null) "predicted" else "missing_source"
+                anchor == null -> "no_anchor"
+                date < anchorDate -> "before_anchor"
+                date == anchorDate -> "anchor"
+                prediction != null -> "predicted"
+                else -> "blocked"
+            }
+            val result = TrendDay(date, actual, energy,
+                energy.knownIntake.takeIf { energy.missingMeals == 0 }, day.isNotEmpty(), prediction,
+                if(actual != null && prediction != null && date != anchorDate) PredictionError(date, actual, prediction) else null,
+                mode, anchor, blocked, status)
+            if(mode == PredictionMode.CUMULATIVE && anchorDate != null && date >= anchorDate) {
+                carried = energy.predicted?.let { ModelPrediction(it, date, prediction!!.predicted, prediction.sourceWeightTime, energy.deficit) }
+                if(carried == null && blocked == null) blocked = date
+            }
+            result
         }
     }
     fun mean(values: List<Double>): Double? = values.takeIf { it.isNotEmpty() }?.average()
@@ -59,21 +83,22 @@ object Trends {
         return (listOf(1.0, 2.0, 5.0, 10.0).firstOrNull { it >= normalized } ?: 10.0) * scale
     }
     fun distribution(errors: List<Double>, count: Int = 9): ErrorDistribution {
-        require(count > 0)
-        require(errors.all { it.isFinite() })
+        require(count > 0 && errors.all { it.isFinite() })
         val extent = niceCeiling(maxOf(0.05, (errors.maxOfOrNull { abs(it) } ?: 0.0) * 1.05))
         val width = extent * 2 / count
         val bins = IntArray(count)
-        errors.forEach { value -> bins[floor((value + extent) / width).toInt().coerceIn(0, count - 1)]++ }
+        errors.forEach { bins[floor((it + extent) / width).toInt().coerceIn(0, count - 1)]++ }
         return ErrorDistribution((0 until count).map { ErrorBin(-extent + it * width, -extent + (it + 1) * width, bins[it]) }, extent)
     }
-    fun chartTables(days: List<TrendDay>): Map<String, String> {
-        val daily = listOf(listOf("date", "day_index", "actual_weight_kg", "actual_measured_at", "intake_kcal", "bmr_kcal", "daily_activity_kcal", "known_extra_exercise_kcal", "total_expenditure_kcal", "deficit_kcal", "saved_prediction_kg", "prediction_snapshot_id", "energy_status")) + days.mapIndexed { i, d ->
-            listOf(d.date.toString(), (i + 1).toString(), Export.number(d.weight?.amount), d.weight?.occurredAt ?: "", Export.number(d.intake), Export.number(d.energy.bmr), Export.number(d.activity), Export.number(d.energy.knownExercise), Export.number(d.energy.total), Export.number(d.energy.deficit), Export.number(d.prediction?.predicted), d.prediction?.id ?: "", if(d.energy.deficit == null) "incomplete" else "trial_current_settings")
+    fun chartTables(days: List<TrendDay>, cumulative: Boolean = false): Map<String, String> {
+        val daily = listOf(listOf("date", "day_index", "actual_weight_kg", "actual_measured_at", "intake_kcal", "bmr_kcal", "daily_activity_kcal", "known_extra_exercise_kcal", "total_expenditure_kcal", "deficit_kcal", "predicted_weight_kg", "prediction_mode", "prediction_status", "source_date", "source_weight_kg", "source_deficit_kcal", "anchor_record_id", "anchor_date", "anchor_weight_kg", "anchor_measured_at", "blocked_on", "error_kg", "energy_status")) + days.mapIndexed { i, d ->
+            listOf(d.date.toString(), (i + 1).toString(), Export.number(d.weight?.amount), d.weight?.occurredAt ?: "", Export.number(d.intake), Export.number(d.energy.bmr), Export.number(d.activity), Export.number(d.energy.knownExercise), Export.number(d.energy.total), Export.number(d.energy.deficit), Export.number(d.prediction?.predicted), d.mode.key, d.predictionStatus, d.prediction?.sourceDate?.toString() ?: "", Export.number(d.prediction?.sourceWeight), Export.number(d.prediction?.sourceDeficit), d.anchor?.id ?: "", d.anchor?.date ?: "", Export.number(d.anchor?.amount), d.anchor?.occurredAt ?: "", d.blockedOn?.toString() ?: "", Export.number(d.error?.kilograms), if(d.energy.deficit == null) "incomplete" else "trial_current_settings")
         }
-        val errors = listOf(listOf("date", "actual_record_id", "actual_measured_at", "actual_weight_kg", "snapshot_id", "snapshot_generated_at", "model_version", "predicted_weight_kg", "error_kg", "relative_error_percent")) + days.mapNotNull { it.error }.map { e ->
-            listOf(e.date.toString(), e.actual.id, e.actual.occurredAt, Export.number(e.actual.amount), e.snapshot.id, e.snapshot.generatedAt, e.snapshot.modelVersion, Export.number(e.snapshot.predicted), Export.number(e.kilograms), Export.number(e.percent))
+        val errors = listOf(listOf("date", "actual_record_id", "actual_measured_at", "actual_weight_kg", "prediction_mode", "source_date", "source_weight_kg", "source_deficit_kcal", "predicted_weight_kg", "error_kg")) + days.filter { it.error != null }.map { d ->
+            val e = d.error!!
+            listOf(e.date.toString(), e.actual.id, e.actual.occurredAt, Export.number(e.actual.amount), d.mode.key, e.prediction.sourceDate.toString(), Export.number(e.prediction.sourceWeight), Export.number(e.prediction.sourceDeficit), Export.number(e.prediction.predicted), Export.number(e.kilograms))
         }
-        return linkedMapOf("trend_daily.csv" to Export.csv(daily), "prediction_errors.csv" to Export.csv(errors))
+        return linkedMapOf((if(cumulative) "cumulative_daily.csv" else "trend_daily.csv") to Export.csv(daily),
+            (if(cumulative) "cumulative_errors.csv" else "prediction_errors.csv") to Export.csv(errors))
     }
 }

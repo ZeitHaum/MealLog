@@ -25,7 +25,6 @@ import java.time.format.DateTimeFormatter
 fun AnalysisPanel(day: List<Record>, date: LocalDate, profile: ModelProfile, snapshots: List<AnalysisSnapshot>, onSettings: () -> Unit, onSave: () -> Unit) {
     val result = remember(day, profile) { EnergyModel.calculate(day, profile) }
     val fingerprint = remember(day) { EnergyModel.fingerprint(day) }
-    var complete by rememberSaveable(date.toString(), fingerprint) { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) { Text("热量与体重", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f)); TextButton(onClick = onSettings) { Text("模型设置") } }
         if(!profile.confirmed) {
@@ -49,10 +48,9 @@ fun AnalysisPanel(day: List<Record>, date: LocalDate, profile: ModelProfile, sna
             if(result.missingExercise > 0) add("${result.missingExercise} 项运动缺少可计算的消耗")
         }
         if(problems.isNotEmpty()) Text(problems.joinToString("；"), color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(complete, onCheckedChange = { complete = it }); Text("已记录全天饮食和额外运动", fontSize = 13.sp) }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if(complete) "当日热量缺口（估计）" else "按已记录数据试算", fontWeight = FontWeight.SemiBold)
+                Text("当日热量缺口（自动试算）", fontWeight = FontWeight.SemiBold)
                 Text(result.deficit?.let { "${Units.display(it)} kcal" } ?: "待补全数据", fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Text("缺口 = 消耗 − 摄入；正数为缺口，负数为盈余。", fontSize = 12.sp)
                 if(result.predicted != null) {
@@ -65,8 +63,8 @@ fun AnalysisPanel(day: List<Record>, date: LocalDate, profile: ModelProfile, sna
             }
         }
         Text("Δ体重 = −热量缺口 ÷ ${Units.display(profile.lambda)} kcal/kg。这是你的简化能量模型估计，不保证次日秤重；水分、糖原和胃肠内容物也会改变读数。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Button(onClick = onSave, enabled = complete && result.predicted != null, modifier = Modifier.fillMaxWidth()) { Text(when { date.isBefore(LocalDate.now()) -> "保存回算快照"; date.isAfter(LocalDate.now()) -> "保存计划估计"; else -> "保存当日预测快照" }) }
-        Text("确认全天记录后可保存快照。历史日期标为回算；记录或参数修改不会覆盖旧快照。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedButton(onClick = onSave, enabled = result.predicted != null, modifier = Modifier.fillMaxWidth()) { Text("另存计算快照（可选）") }
+        Text("预测已自动更新，无需确认或保存。上方按钮仅用于另存一份历史快照，不影响趋势图。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         snapshots.firstOrNull()?.let { snapshot ->
             Card { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("已保存 ${snapshots.size} 次计算", fontWeight = FontWeight.SemiBold)

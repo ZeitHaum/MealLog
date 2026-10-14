@@ -35,8 +35,16 @@ object EnergyModel {
     fun fingerprint(records: List<Record>) = MessageDigest.getInstance("SHA-256").digest(records.sortedBy { it.id }.joinToString("\n") { it.toString() }.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 255) }
     fun exerciseEnergy(record: Record, weight: Double?): Double? = record.calories ?: if(record.met != null && record.amount != null && weight != null) record.met * weight * 1.05 * record.amount / 60.0 else null
     fun calculate(day: List<Record>, profile: ModelProfile): EnergyDay {
-        val measurement = day.filter { it.kind == Kinds.WEIGHT }.maxByOrNull { OffsetDateTime.parse(it.occurredAt).toInstant() }
-        val weight = measurement?.amount
+        val measurement = latestWeight(day)
+        return calculateAtWeight(day, profile, measurement?.amount, measurement?.occurredAt)
+    }
+    fun validWeight(record: Record) = record.kind == Kinds.WEIGHT && record.amount?.let { it.isFinite() && it > 0 } == true
+    fun latestWeight(day: List<Record>): Record? = day.filter(::validWeight)
+        .maxWithOrNull(compareBy<Record> { OffsetDateTime.parse(it.occurredAt).toInstant() }.thenBy { it.id })
+
+    // Explicit weight input prevents future measurements from leaking into cumulative forecasts.
+    fun calculateAtWeight(day: List<Record>, profile: ModelProfile, calculationWeight: Double?, weightTime: String? = null): EnergyDay {
+        val weight = calculationWeight?.takeIf { it.isFinite() && it > 0 }
         val meals = day.filter { it.kind == Kinds.MEAL }
         val movements = day.filter { it.kind == Kinds.EXERCISE }
         val missingMeals = meals.count { it.calories == null }
@@ -50,8 +58,9 @@ object EnergyModel {
         val baseline = bmr?.times(profile.activityFactor)
         val total = if(missingExercise == 0) baseline?.plus(exercise) else null
         val deficit = if(missingMeals == 0 && meals.isNotEmpty()) total?.minus(intake) else null
-        val delta = deficit?.let { -it / profile.lambda }
-        return EnergyDay(weight, measurement?.occurredAt, intake, missingMeals, missingExercise, bmr, baseline, exercise, total, deficit, delta, if(delta != null && weight != null) weight + delta else null, mealValues.takeIf { it.isNotEmpty() }?.sum(), knownMovements.takeIf { it.isNotEmpty() }?.sum())
+        val delta = deficit?.let { -it / profile.lambda }?.takeIf { it.isFinite() }
+        val predicted = if(delta != null && weight != null) (weight + delta).takeIf { it.isFinite() && it > 0 } else null
+        return EnergyDay(weight, weightTime, intake, missingMeals, missingExercise, bmr, baseline, exercise, total, deficit, delta, predicted, mealValues.takeIf { it.isNotEmpty() }?.sum(), knownMovements.takeIf { it.isNotEmpty() }?.sum())
     }
     fun snapshot(day: List<Record>, profile: ModelProfile, date: String, mode: String): AnalysisSnapshot {
         profile.validate()

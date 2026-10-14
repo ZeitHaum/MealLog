@@ -9,7 +9,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 object Export {
-    const val FORMAT_VERSION = "1.2"
+    const val FORMAT_VERSION = "2.0"
     fun number(value: Double?): String = value?.let { BigDecimal.valueOf(it).stripTrailingZeros().toPlainString() } ?: ""
     fun csv(rows: List<List<String>>): String = "\uFEFF" + rows.joinToString("\r\n", postfix = "\r\n") { row ->
         row.joinToString(",") { value -> "\"${value.replace("\"", "\"\"")}\"" }
@@ -66,17 +66,25 @@ object Export {
         selected.forEach { it.validate() }
         val photos = selected.flatMap { it.photoNames() }.distinct().sorted()
         val trendDays = Trends.days(records, snapshots, profile, start, end)
-        val contextSnapshotIds = trendDays.mapNotNull { it.prediction?.id }.toSet()
-        val selectedSnapshots = snapshots.filter { LocalDate.parse(it.date) in start..end || it.id in contextSnapshotIds }
+        val cumulativeDays = Trends.days(records, snapshots, profile, start, end, PredictionMode.CUMULATIVE)
+        val contextRecords = records.filter { LocalDate.parse(it.date) == start.minusDays(1) }
+        val selectedSnapshots = snapshots.filter { LocalDate.parse(it.date) in start..end }
         photos.forEach { require(File(photosDir, it).isFile) { "照片缺失，无法完整导出：$it" } }
         ZipOutputStream(output).use { zip ->
             fun entry(name: String, bytes: ByteArray) { zip.putNextEntry(ZipEntry(name)); zip.write(bytes); zip.closeEntry() }
             tables(selected).forEach { (name, body) -> entry(name, body.toByteArray(Charsets.UTF_8)) }
             entry("analysis.csv", analysisTable(selected, profile).toByteArray(Charsets.UTF_8))
             Trends.chartTables(trendDays).forEach { (name, body) -> entry(name, body.toByteArray(Charsets.UTF_8)) }
+            Trends.chartTables(cumulativeDays, cumulative = true).forEach { (name, body) -> entry(name, body.toByteArray(Charsets.UTF_8)) }
+            entry("prediction_context.json", json(linkedMapOf(
+                "purpose" to "Previous-day calculation inputs for the first daily prediction; not part of selected-range totals",
+                "previous_day_records" to contextRecords.sortedBy { it.id }.map { r -> linkedMapOf(
+                    "id" to r.id, "kind" to r.kind, "date" to r.date, "occurred_at" to r.occurredAt,
+                    "amount" to r.amount, "energy_kcal" to r.calories, "met" to r.met) }
+            )).toByteArray(Charsets.UTF_8))
             entry("prediction_snapshots.csv", snapshotTable(selectedSnapshots).toByteArray(Charsets.UTF_8))
             entry("model_settings.json", json(linkedMapOf("model_version" to EnergyModel.VERSION, "confirmed" to profile.confirmed, "height_cm" to profile.heightCm, "age" to profile.age, "sex" to profile.sex, "activity_factor" to profile.activityFactor, "lambda_kcal_per_kg" to profile.lambda, "exercise_accounting" to "additional_to_activity_factor")).toByteArray(Charsets.UTF_8))
-            entry("manifest.json", json(linkedMapOf("format" to "diet-records", "format_version" to FORMAT_VERSION, "exported_at" to OffsetDateTime.now().toString(), "start_date" to start.toString(), "end_date" to end.toString(), "record_count" to selected.size, "photo_count" to photos.size, "snapshot_count" to selectedSnapshots.size)).toByteArray(Charsets.UTF_8))
+            entry("manifest.json", json(linkedMapOf("format" to "diet-records", "format_version" to FORMAT_VERSION, "exported_at" to OffsetDateTime.now().toString(), "start_date" to start.toString(), "end_date" to end.toString(), "record_count" to selected.size, "photo_count" to photos.size, "snapshot_count" to selectedSnapshots.size, "prediction_context_record_count" to contextRecords.size, "prediction_semantics" to "current_settings_recomputed", "error_definition" to "predicted_minus_actual_kg")).toByteArray(Charsets.UTF_8))
             entry("records.json", json(selected.sortedBy { it.id }.map { r -> linkedMapOf("id" to r.id, "kind" to r.kind, "occurred_at" to r.occurredAt, "date" to r.date, "name" to r.name, "amount" to r.amount, "amount_unit" to when(r.kind) { Kinds.WEIGHT -> "kg"; Kinds.MEAL -> "g"; else -> "min" }, "energy_kcal" to r.calories, "met" to r.met, "photos" to r.photoNames().map { "photos/$it" }, "note" to r.note, "created_at" to r.createdAt, "updated_at" to r.updatedAt) }).toByteArray(Charsets.UTF_8))
             entry("README.txt", """
 食记导出格式 v$FORMAT_VERSION
@@ -86,18 +94,24 @@ meals.csv：eaten_at 进食时间；food_name 食物名称；weight_g 克数；e
 exercises.csv：started_at 运动开始时间；exercise_name 运动名称；duration_min 分钟数；energy_kcal 手动填写的额外消耗；met 运动强度；energy_method 为 manual/met/unknown。MET 估算 = MET × 当天最后体重 kg × 1.05 × 时长小时，完整结果作为活动系数之外的额外消耗相加。
 daily_summary.csv：按实际发生日期汇总。latest_weight_kg/latest_measured_at 为当天最后一次测量；known_food_weight_g/known_energy_kcal 只合计已填写值；*_missing_count 表示缺失条数；exercise_duration_min 为已记录运动时长。
 analysis.csv：导出时按当前设置重算的逐日结果。status=incomplete 表示不足以计算；trial_current_settings 表示按已录入数据试算，不代表用户已完成全天记录。known_* 仅合计已知值；没有记录不能推断实际为零。模型参数、最新体重及其时间、BMR、日常消耗、额外运动、总消耗、缺口、一日变化和次日体重均分列保存。
-prediction_snapshots.csv：用户确认全天记录后主动保存的计算快照。generated_at 为保存时间；mode=retrospective 是历史回算，same_day_estimate 是当日估计，planned 是未来日期估计。每次计算的参数、输入汇总、结果、模型版本和记录指纹固定保留，修改记录或参数不会改写旧快照。比较预测时优先使用次日实际称重之前保存的快照，并区分回算。record_fingerprint 用于识别记录是否改变。
-model_settings.json：导出时的当前模型参数；confirmed=false 时不计算基础代谢或预测。
-trend_daily.csv：趋势图对应的逐日数据，连续日历日保留空行，不会把缺测当成零。day_index 为区间内第几天；daily_activity_kcal = BMR ×（活动系数−1）；saved_prediction_kg 是目标日期前一日保存的有效预测，区别于按当前参数试算的次日体重。
-prediction_errors.csv：每个目标日期仅保留最后一份有效事前预测与每日最后实测体重的配对。relative_error_percent =（预测−实测）÷ 实测 ×100；error_kg = 预测−实测。排除历史回算、计划估计，以及保存时间不早于目标日任一次称重或体重录入的快照。预测使用保存时的参数；实测使用导出时的最新记录，修改实际体重会改变误差。用于配对的区间前一日快照也一并包含在 prediction_snapshots.csv 中。
+prediction_snapshots.csv：历史上主动保存的计算快照，供档案比较。generated_at 为保存时间；mode=retrospective 是历史回算，same_day_estimate 是当日估计，planned 是未来估计。旧快照不改写，不再参与趋势配对。
+model_settings.json：导出时的当前模型参数；confirmed=false 时不计算基础代谢或后续预测。
+trend_daily.csv：按当前参数自动重算的逐日预测。目标日 predicted_weight_kg = 前一日最后实测体重 − 前一日热量缺口 / λ，无需确认和保存。source_* 保存来源日期、体重、缺口；无法计算时留空。实际体重取目标日最后一次有效称重。
+prediction_errors.csv：逐日预测与实测配对，error_kg = 预测 − 实测，单位 kg，正负号保留。没有百分比，也不取绝对值。
+cumulative_daily.csv：选区内最早有效称重为 W₀（anchor_*）；此后 BMR 和 MET 只用递推体重计算，实测只作对照。起点日实测列为 W₀，其余日期取最后实测。漏称不打断递推；缺少饮食热量或不可计算的运动消耗则从次日停止，blocked_on 指出首个数据不足的来源日期；不跳过、不重新锚定。补齐记录后重新导出即可续算。
+cumulative_errors.csv：累计预测的有向 kg 误差；排除作为起点的 W₀。
+两个 daily 表均保留连续日历日，空值不填零。day_index 是选区内序号；prediction_mode 为 daily_recomputed/cumulative_recomputed。prediction_status 为 predicted、missing_source（逐日来源不足）、no_anchor（无起点）、before_anchor、anchor 或 blocked；energy_status 为 incomplete 或 trial_current_settings。daily_activity_kcal = BMR ×（活动系数−1）。source_weight_kg 在逐日模式是前一日实测，在累计模式是前一日模型体重；起点行 source_deficit_kcal 为空。
+prediction_context.json：额外包含区间前一日的计算输入（不含照片或备注），用于独立复算区间第一天的逐日预测；不计入区间记录数和摄入汇总。amount 的单位与原始记录相同。累计预测不使用区间外称重。
+趋势与误差都是当前参数的重新计算，不是事前冻结预测；旧快照保留在单独的历史表。
 
-CSV：UTF-8 BOM 编码，CRLF 换行，英文固定列名，双引号转义。时间为含时区偏移的 ISO 8601。空白表示未知，0 表示明确记录为零。没有记录的日期只在 trend_daily.csv 保留日期行，其余汇总不生成行；不能据此认定当日没有进食或运动。时区改变不重分配已有记录的日期。
+
+CSV：UTF-8 BOM 编码，CRLF 换行，英文固定列名，双引号转义。时间为含时区偏移的 ISO 8601。空白表示未知，0 表示明确记录为零。没有记录的日期在 trend_daily.csv 和 cumulative_daily.csv 保留日期行，其余汇总不生成行；不能据此认定当日没有进食或运动。时区改变不重分配已有记录的日期。
 CSV 文本若以 =、+、-、@ 或制表符等开头，增加单引号以避免 Excel 当公式执行；records.json 保留原始文本，无此前缀。
 records.json：结构化原始记录，amount 单位由 amount_unit 指定；photos 为照片相对路径列表。manifest.json 包含格式版本、导出日期范围和数量。当前版本仅支持导出，不提供导入恢复。
 photos/：本次记录照片的本地副本，已转换为最大边 2048 像素的 JPEG。
 
 计算约定：BMR = 10 × 体重kg + 6.25 × 身高cm − 5 × 年龄 + 性别参数（男性5，女性−161），采用 Mifflin–St Jeor 静息代谢估计式。总消耗 = BMR × 日常活动系数 + 额外运动；热量缺口 = 总消耗 − 摄入；预测变化kg = −缺口 / λ；理论次日体重 = 当天最后体重 + 预测变化。λ 默认7500 kcal/kg，可修改。这是简化能量模型的一日折算；水分、糖原和胃肠内容物会影响实际秤重。称重时刻也会影响比较，建议逐日比较相近时间的测量。
-饮食热量为手动输入，未进行照片识别；食物克数不会自动等同于热量。运动和日常活动系数按用户模型独立计入。原始明细、试算、保存快照分别保留供后续分析。
+饮食热量可手动填写或明确采用参考表估算，未进行照片识别；食物克数不会自动等同于热量。运动和日常活动系数按用户模型独立计入。原始明细、试算、保存快照分别保留供后续分析。
 """.trimIndent().toByteArray(Charsets.UTF_8))
             photos.forEach { name -> zip.putNextEntry(ZipEntry("photos/$name")); File(photosDir, name).inputStream().use { it.copyTo(zip) }; zip.closeEntry() }
         }

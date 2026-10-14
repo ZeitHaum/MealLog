@@ -51,7 +51,7 @@ class ExportTest {
             Export.writeZip(buffer, listOf(included, excluded), dir, LocalDate.parse("2026-10-08"), LocalDate.parse("2026-10-08"))
             val files = mutableMapOf<String, ByteArray>()
             ZipInputStream(ByteArrayInputStream(buffer.toByteArray())).use { zip -> while(true) { val entry = zip.nextEntry ?: break; files[entry.name] = zip.readBytes() } }
-            assertEquals(setOf("weights.csv", "meals.csv", "exercises.csv", "daily_summary.csv", "analysis.csv", "trend_daily.csv", "prediction_errors.csv", "prediction_snapshots.csv", "model_settings.json", "records.json", "manifest.json", "README.txt", "photos/$photo"), files.keys)
+            assertEquals(setOf("weights.csv", "meals.csv", "exercises.csv", "daily_summary.csv", "analysis.csv", "trend_daily.csv", "prediction_errors.csv", "cumulative_daily.csv", "cumulative_errors.csv", "prediction_context.json", "prediction_snapshots.csv", "model_settings.json", "records.json", "manifest.json", "README.txt", "photos/$photo"), files.keys)
             assertArrayEquals(byteArrayOf(1, 2, 3, 4), files["photos/$photo"])
             val meals = parseCsv(files.getValue("meals.csv").toString(Charsets.UTF_8))
             assertEquals(2, meals.size)

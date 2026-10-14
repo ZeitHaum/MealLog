@@ -236,7 +236,7 @@ private fun DateButton(date: LocalDate, onChange: (LocalDate) -> Unit) {
 }
 
 @Composable
-private fun RecordEditor(kind: String, selectedDate: LocalDate, existing: Record?, saving: Boolean, onDismiss: () -> Unit, onSave: (Record) -> Unit) {
+internal fun RecordEditor(kind: String, selectedDate: LocalDate, existing: Record?, saving: Boolean, onDismiss: () -> Unit, onSave: (Record) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val original = existing?.let { OffsetDateTime.parse(it.occurredAt) }
@@ -254,7 +254,16 @@ private fun RecordEditor(kind: String, selectedDate: LocalDate, existing: Record
     var cameraPath by rememberSaveable { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var importing by remember { mutableStateOf(false) }
+    var referenceOpen by rememberSaveable { mutableStateOf(false) }
     val units = Units.forKind(kind)
+    if(referenceOpen) ReferenceDialog(food = kind == Kinds.MEAL, grams = amount.toDoubleOrNull()?.times(units[unitIndex].factor), onDismiss = { referenceOpen = false }) { entry, value ->
+        if(kind == Kinds.MEAL) calories = Export.number(value / Units.energy[energyIndex].factor)
+        else { met = Export.number(value); exerciseMode = 1 }
+        if(name.isBlank()) name = entry.name
+        val sourceNote = "参考估算：${entry.name} · ${entry.value} ${if(kind == Kinds.MEAL) "kcal/100g" else "MET"} · ${entry.id}"
+        note = listOf(note, sourceNote).filter { it.isNotBlank() }.joinToString("\n")
+        referenceOpen = false
+    }
     fun importPhoto(uri: Uri) { importing = true; scope.launch { try { val filename = withContext(Dispatchers.IO) { PhotoFiles.import(context, uri) }; photos = (photos.split(';').filter { it.isNotBlank() } + filename).joinToString(";") } catch(e: Exception) { error = e.message ?: "添加照片失败" } finally { importing = false } } }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if(uri != null) importPhoto(uri) }
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success -> cameraPath?.let { path -> if(success) importPhoto(Uri.fromFile(File(path))) else File(path).delete() }; cameraPath = null }
@@ -287,6 +296,7 @@ private fun RecordEditor(kind: String, selectedDate: LocalDate, existing: Record
                         calories.toDoubleOrNull()?.takeIf { it.isFinite() }?.let { calories = Export.number(it * Units.energy[energyIndex].factor / Units.energy[newIndex].factor) }; energyIndex = newIndex
                     })
                     if(kind == Kinds.EXERCISE) {
+                        TextButton(onClick = { referenceOpen = true }) { Text("运动参考") }
                         Text("活动系数之外的额外消耗", fontWeight = FontWeight.SemiBold)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FilterChip(exerciseMode == 0, onClick = { exerciseMode = 0 }, label = { Text("填写热量") })
@@ -299,6 +309,7 @@ private fun RecordEditor(kind: String, selectedDate: LocalDate, existing: Record
                         }
                     }
                     if(kind == Kinds.MEAL) {
+                        TextButton(onClick = { referenceOpen = true }) { Text("热量参考") }
                         Text("饮食照片 · 可选", fontWeight = FontWeight.SemiBold)
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OutlinedButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }, enabled = !importing) { Text("从相册选择") }

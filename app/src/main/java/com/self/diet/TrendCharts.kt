@@ -38,7 +38,7 @@ internal val MutedColor = Color(0xFF657168)
 
 internal fun chartNumber(value: Double?, places: Int = 1): String = value?.let { String.format(Locale.US, "%.${places}f", if(abs(it) < 0.5 * 10.0.pow(-places)) 0.0 else it) } ?: "—"
 internal fun signedNumber(value: Double?, places: Int = 1): String = if(value == null) "—" else (if(value > 0) "+" else "") + chartNumber(value, places)
-enum class DailyChartKind { WEIGHT, ENERGY, DEFICIT }
+enum class DailyChartKind { WEIGHT, ENERGY, DEFICIT, ERROR }
 internal data class Axis(val low: Double, val high: Double, val ticks: List<Double>)
 
 internal fun chartAxis(values: List<Double>, kind: DailyChartKind): Axis = when(kind) {
@@ -57,6 +57,10 @@ internal fun chartAxis(values: List<Double>, kind: DailyChartKind): Axis = when(
         val high = ceil(limit / step) * step
         Axis(0.0, high, (0..(high / step).roundToInt()).map { it * step })
     }
+    DailyChartKind.ERROR -> {
+        val high = Trends.niceCeiling(maxOf(0.1, (values.maxOfOrNull { abs(it) } ?: 0.0) * 1.1))
+        Axis(-high, high, listOf(-high, -high / 2, 0.0, high / 2, high))
+    }
     DailyChartKind.DEFICIT -> {
         val limit = maxOf(100.0, (values.maxOfOrNull { abs(it) } ?: 1.0) * 1.1)
         val step = Trends.niceCeiling(limit / 3)
@@ -73,16 +77,17 @@ fun DailyChart(days: List<TrendDay>, kind: DailyChartKind, selected: Int, onSele
         DailyChartKind.WEIGHT -> listOfNotNull(d.weight?.amount, d.prediction?.predicted)
         DailyChartKind.ENERGY -> listOfNotNull(d.intake, (d.energy.baseline ?: 0.0).plus(d.energy.exercise).takeIf { d.energy.bmr != null || it > 0 })
         DailyChartKind.DEFICIT -> listOfNotNull(d.energy.deficit)
+        DailyChartKind.ERROR -> listOfNotNull(d.error?.kilograms)
     } } }
     if(values.isEmpty()) {
-        ChartEmpty(when(kind) { DailyChartKind.WEIGHT -> "记录体重后，这里会显示逐日变化"; DailyChartKind.ENERGY -> "补充饮食热量、体重及模型设置后查看"; DailyChartKind.DEFICIT -> "补全当天收支后，这里会显示热量缺口" })
+        ChartEmpty(when(kind) { DailyChartKind.WEIGHT -> "记录体重后，这里会显示逐日变化"; DailyChartKind.ENERGY -> "补充饮食热量、体重及模型设置后查看"; DailyChartKind.DEFICIT -> "补全当天收支后，这里会显示热量缺口"; DailyChartKind.ERROR -> "预测与实测都有值时显示误差" })
         return
     }
     val axis = remember(values, kind) { chartAxis(values, kind) }
-    val yTexts = axis.ticks.map { chartNumber(it, if(kind == DailyChartKind.WEIGHT) 1 else 0) }
+    val yTexts = axis.ticks.map { chartNumber(it, if(kind == DailyChartKind.WEIGHT) 1 else if(kind == DailyChartKind.ERROR) 2 else 0) }
     val left = maxOf(with(density) { 42.dp.toPx() }, yTexts.maxOf { labelPaint.measureText(it) } + with(density) { 10.dp.toPx() })
     val right = with(density) { 12.dp.toPx() }
-    val title = when(kind) { DailyChartKind.WEIGHT -> "体重趋势图"; DailyChartKind.ENERGY -> "每日能量图"; DailyChartKind.DEFICIT -> "热量缺口图" }
+    val title = when(kind) { DailyChartKind.WEIGHT -> "体重趋势图"; DailyChartKind.ENERGY -> "每日能量图"; DailyChartKind.DEFICIT -> "热量缺口图"; DailyChartKind.ERROR -> "带符号的预测误差图" }
     Canvas(Modifier.fillMaxWidth().height(if(showXAxis) 205.dp else 175.dp).testTag("chart-${kind.name}").semantics { contentDescription = "$title，可点击选择日期；准确数值见图下方" }
         .pointerInput(days, left, right) { detectTapGestures { point ->
             val step = (size.width - left - right) / days.size
@@ -102,9 +107,9 @@ internal fun DrawScope.drawDailyPlot(days: List<TrendDay>, kind: DailyChartKind,
         axis.ticks.forEach { value ->
             val position = y(value)
             drawLine(if(value == 0.0) Color(0xFFBBC8BD) else GridColor, Offset(left, position), Offset(size.width - right, position), if(value == 0.0) 1.2.dp.toPx() else 1.dp.toPx())
-            label(chartNumber(value, if(kind == DailyChartKind.WEIGHT) 1 else 0), left - 7.dp.toPx(), position + labelPaint.textSize * 0.35f, labelPaint, Paint.Align.RIGHT)
+            label(chartNumber(value, if(kind == DailyChartKind.WEIGHT) 1 else if(kind == DailyChartKind.ERROR) 2 else 0), left - 7.dp.toPx(), position + labelPaint.textSize * 0.35f, labelPaint, Paint.Align.RIGHT)
         }
-        label(if(kind == DailyChartKind.WEIGHT) "kg" else "kcal", left, 11.dp.toPx(), labelPaint, Paint.Align.LEFT)
+        label(if(kind == DailyChartKind.WEIGHT || kind == DailyChartKind.ERROR) "kg" else "kcal", left, 11.dp.toPx(), labelPaint, Paint.Align.LEFT)
         if(selected in days.indices) drawLine(Color(0xFFBCCCBF), Offset(x(selected), top), Offset(x(selected), bottom), 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx())))
         fun line(get: (TrendDay) -> Double?, color: Color, dashed: Boolean = false) {
             var last: Offset? = null
@@ -137,6 +142,7 @@ internal fun DrawScope.drawDailyPlot(days: List<TrendDay>, kind: DailyChartKind,
                 }
                 line({ it.intake }, IntakeColor)
             }
+            DailyChartKind.ERROR -> line({ it.error?.kilograms }, PredictionColor)
             DailyChartKind.DEFICIT -> {
                 val barWidth = minOf(18.dp.toPx(), step * 0.66f)
                 days.forEachIndexed { i, day -> day.energy.deficit?.let { value ->
@@ -155,20 +161,20 @@ internal fun DrawScope.drawDailyPlot(days: List<TrendDay>, kind: DailyChartKind,
 
 @Composable
 fun ErrorHistogram(errors: List<PredictionError>) {
-    if(errors.isEmpty()) { ChartEmpty("保存当日预测，再记录次日体重\n这里会自动生成误差分布"); return }
-    val histogram = remember(errors) { Trends.distribution(errors.map { it.percent }) }
+    if(errors.isEmpty()) { ChartEmpty("预测与实测都有值时\n这里会自动生成误差分布"); return }
+    val histogram = remember(errors) { Trends.distribution(errors.map { it.kilograms }) }
     val density = LocalDensity.current
     val paint = remember(density.density, density.fontScale) { Paint(Paint.ANTI_ALIAS_FLAG).apply { color = MutedColor.toArgb(); textSize = with(density) { 10.sp.toPx() } } }
     var selected by remember(errors) { mutableIntStateOf(-1) }
     val left = with(density) { 32.dp.toPx() }
     val right = with(density) { 12.dp.toPx() }
-    Canvas(Modifier.fillMaxWidth().height(210.dp).testTag("error-histogram").semantics { contentDescription = "相对预测误差分布，横轴误差百分比，纵轴天数。点击柱子查看范围和数量。" }
+    Canvas(Modifier.fillMaxWidth().height(210.dp).testTag("error-histogram").semantics { contentDescription = "预测误差分布，横轴预测减实际的体重差（kg），纵轴天数。点击柱子查看范围和数量。" }
         .pointerInput(histogram) { detectTapGestures { selected = floor((it.x - left) / (size.width - left - right) * histogram.bins.size).toInt().coerceIn(histogram.bins.indices) } }) {
         drawHistogramPlot(histogram, selected, paint, left, right)
     }
     if(selected >= 0) {
         val bin = histogram.bins[selected]
-        Text("${chartNumber(bin.lower, 3)}% 至 ${chartNumber(bin.upper, 3)}%：${bin.count} 天", color = WeightColor, fontSize = 12.sp)
+        Text("${signedNumber(bin.lower, 3)} 至 ${signedNumber(bin.upper, 3)} kg：${bin.count} 天", color = WeightColor, fontSize = 12.sp)
     }
 }
 
@@ -189,9 +195,9 @@ internal fun DrawScope.drawHistogramPlot(histogram: ErrorDistribution, selected:
         }
         drawLine(MutedColor.copy(alpha = .5f), Offset(left + width / 2, top), Offset(left + width / 2, bottom), 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 4.dp.toPx())))
         val places = if(histogram.extent < 0.1) 3 else if(histogram.extent < 1) 2 else 1
-        label("−${chartNumber(histogram.extent, places)}%", left, bottom + 20.dp.toPx(), paint, Paint.Align.LEFT)
+        label("−${chartNumber(histogram.extent, places)} kg", left, bottom + 20.dp.toPx(), paint, Paint.Align.LEFT)
         label("0", left + width / 2, bottom + 20.dp.toPx(), paint, Paint.Align.CENTER)
-        label("+${chartNumber(histogram.extent, places)}%", size.width - right, bottom + 20.dp.toPx(), paint, Paint.Align.RIGHT)
+        label("+${chartNumber(histogram.extent, places)} kg", size.width - right, bottom + 20.dp.toPx(), paint, Paint.Align.RIGHT)
 }
 
 internal fun DrawScope.label(value: String, x: Float, y: Float, paint: Paint, align: Paint.Align) {

@@ -49,7 +49,7 @@ class TrendsUiTest {
         compose.onNodeWithTag("previous-trend-day").performClick()
         compose.onNodeWithTag("selected-trend-date").assertTextEquals("2026-10-08")
         compose.onNodeWithTag("trends-list").performScrollToNode(hasText("每日变化"))
-        compose.onNodeWithTag("chart-WEIGHT").performTouchInput { click(Offset(1f, height / 2f)) }
+        compose.onNodeWithTag("chart-WEIGHT").performScrollTo().performTouchInput { click(Offset(1f, height / 2f)) }
         compose.onNodeWithTag("selected-trend-date").assertTextEquals("2026-10-03")
         saveScreenshot("trends-weight-ui.png")
         compose.onNodeWithTag("trends-list").performScrollToNode(hasText("预测误差分布"))
@@ -66,6 +66,7 @@ class TrendsUiTest {
         val folder = File(context.getExternalFilesDir(null), "verification").apply { mkdirs() }
         val sets = listOf(
             "trends-sample.png" to Trends.days(rows, snapshots, profile, end.minusDays(29), end),
+            "cumulative-sample.png" to Trends.days(rows, snapshots, profile, end.minusDays(6), end, PredictionMode.CUMULATIVE),
             "trends-single.png" to Trends.days(rows, snapshots, profile, end, end),
             "trends-empty.png" to Trends.days(emptyList(), emptyList(), profile, end.minusDays(6), end)
         )

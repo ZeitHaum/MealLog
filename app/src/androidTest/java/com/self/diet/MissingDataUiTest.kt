@@ -48,7 +48,7 @@ class MissingDataUiTest {
             compose.onNodeWithText("趋势总览").assertExists()
             compose.onNodeWithTag("trends-list").performScrollToNode(hasText("每日变化"))
             compose.runOnIdle { page.intValue = 1 }
-            compose.onNodeWithText("保存当日预测快照").assertIsNotEnabled()
+            compose.onNodeWithText("另存计算快照（可选）").assertIsNotEnabled()
             compose.onNodeWithText("待补全数据").assertExists()
             if(i == 0) compose.onNodeWithText("0 kcal").assertDoesNotExist()
         }
